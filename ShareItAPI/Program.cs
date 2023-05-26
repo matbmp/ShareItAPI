@@ -4,17 +4,17 @@ using ShareItAPI.Models;
 using ShareItAPI.DTO;
 using ShareItAPI;
 using Microsoft.AspNetCore.Authorization;
-using System.Security.Claims;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authentication;
-using Microsoft.Extensions.Hosting;
-using ShareItAPI.Migrations;
+using ShareItAPI.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
 AuthSettings authSettings = new AuthSettings();
 builder.Configuration.GetSection("Auth").Bind(authSettings);
 builder.Services.AddSingleton(authSettings);
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddTransient<AuthorizationService>();
 
 builder.Services.AddTransient<CustomAuthenticationHandler>();
 builder.Services.AddAuthentication(authSettings.AuthenticationScheme)
@@ -56,13 +56,13 @@ app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
 
-
+// user Endpoints -------------------------------------------------------------------------------------------------------------------------------------
 app.MapGet("/user", async ([FromServices] ShareItDBContext db, [FromServices] Mapper mapper) =>
 {
     return mapper.Map(await db.Users.ToListAsync());
 });
-
-app.MapPost("/user", async ([FromBody] UserPostRequest request, [FromServices] ShareItDBContext db, [FromServices] Mapper mapper) =>
+app.MapPost("/user", async ([FromBody] UserPostRequest request, 
+    [FromServices] ShareItDBContext db, [FromServices] Mapper mapper) =>
 {
     var user = mapper.Map(request);
     user.Password = BCrypt.Net.BCrypt.HashPassword(user.Password);
@@ -71,16 +71,18 @@ app.MapPost("/user", async ([FromBody] UserPostRequest request, [FromServices] S
     await db.SaveChangesAsync();
     return Results.Created($"/user/{user.Id}", user.Id);
 });
-app.MapDelete("/user", [Authorize] async ([FromServices] ShareItDBContext db, HttpContext context) =>
+app.MapDelete("/user", [Authorize] async (
+    [FromServices] ShareItDBContext db, [FromServices] AuthorizationService authorization) =>
 {
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
+    if (await authorization.getLoggedUserAsync() is not User user) return Results.Problem();
     db.Remove(user);
     await db.SaveChangesAsync();
     return Results.Ok();
 });
-app.MapPut("/user/modify", [Authorize] async ([FromBody] UserPutRequest request, [FromServices] ShareItDBContext db, HttpContext context) =>
+app.MapPut("/user/modify", [Authorize] async ([FromBody] UserPutRequest request,
+    [FromServices] ShareItDBContext db, [FromServices]AuthorizationService authorization) =>
 {
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
+    if (await authorization.getLoggedUserAsync() is not User user) return Results.Problem();
     if (request.Username is not null)
     {
         user.Username = request.Username;
@@ -93,7 +95,16 @@ app.MapPut("/user/modify", [Authorize] async ([FromBody] UserPutRequest request,
     return Results.Ok();
 });
 
-app.MapPost("/session", async ([FromBody]SessionPostRequest request, [FromServices] ShareItDBContext db, [FromServices]Mapper mapper) =>
+
+
+
+
+
+
+
+// session Endpoints -------------------------------------------------------------------------------------------------------------------------------------
+app.MapPost("/session", async ([FromBody]SessionPostRequest request,
+    [FromServices] ShareItDBContext db,  [FromServices]Mapper mapper) =>
 {
     var user = await db.Users.ByUsername(request.Username).FirstOrDefaultAsync();
     if (user is null)
@@ -111,40 +122,42 @@ app.MapPost("/session", async ([FromBody]SessionPostRequest request, [FromServic
     await db.SaveChangesAsync();
     return Results.Ok(mapper.Map(session));
 });
-app.MapDelete("/session", [Authorize] async ([FromQuery] string key, [FromServices] ShareItDBContext db, HttpContext context) =>
+app.MapDelete("/session", [Authorize] async ([FromQuery] string key, 
+    [FromServices] ShareItDBContext db, [FromServices] AuthorizationService authorization) =>
 {
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
+    if (await authorization.getLoggedUserAsync() is not User user) return Results.Problem();
     if (await db.Sessions.ByKeyIdAndUserId(key, user.Id).FirstOrDefaultAsync() is not Session session) return Results.NotFound();
     db.Sessions.Remove(session);
     await db.SaveChangesAsync();
     return Results.Ok();
 });
-/*
-app.MapGet("/session", [Authorize] async ([FromServices] ShareItDBContext db, HttpContext context, [FromServices]Mapper mapper) =>
-{
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
-    return Results.Ok(mapper.Map(user));
-});
-*/
 
+
+
+
+
+
+
+
+
+// post Endpoints -------------------------------------------------------------------------------------------------------------------------------------
 app.MapGet("/post/{postId}", async (long postId,
-    [FromServices] ShareItDBContext db, [FromServices] Mapper mapper, HttpContext context) =>
+    [FromServices] ShareItDBContext db,  [FromServices]AuthorizationService authorization, [FromServices] Mapper mapper) =>
 {
     if (await db.Posts.ById(postId).WithAuthorAndSection().FirstOrDefaultAsync() is not Post post) return Results.NotFound();
     var mapped = mapper.Map(post);
-    if (await getLoggedUserAsync(db, context) is User user)
+    if (await authorization.getLoggedUserAsync() is User user)
     {
         mapped.IsLiked = await db.PostLikes.AnyAsync(pl => pl.PostId == postId && pl.UserId == user.Id);
     }
     return Results.Ok(mapped);
 });
-
 app.MapGet("/post", async ([FromQuery]int take,[FromQuery] int skip, [FromQuery] bool? refresh,
-    [FromServices] ShareItDBContext db, [FromServices]Mapper mapper, HttpContext context) =>
+    [FromServices] ShareItDBContext db,  [FromServices]AuthorizationService authorization, [FromServices]Mapper mapper) =>
 {
     var post = await db.Posts.OrderByDescending(p => p.CreatedDate).SkipTake(skip, take).WithAuthorAndSection().ToListAsync();
     var mapped = mapper.Map(post);
-    if (await getLoggedUserAsync(db, context) is User user)
+    if (await authorization.getLoggedUserAsync() is User user)
     {
         foreach(var m in mapped)
         {
@@ -182,10 +195,10 @@ app.MapGet("/post", async ([FromQuery]int take,[FromQuery] int skip, [FromQuery]
     }
     */
 });
-
-app.MapPost("/post", [Authorize] async ([FromBody] PostPostRequest request, [FromServices] ShareItDBContext db, [FromServices] Mapper mapper, HttpContext context) =>
+app.MapPost("/post", [Authorize] async ([FromBody] PostPostRequest request, 
+    [FromServices] ShareItDBContext db, [FromServices]AuthorizationService authorization, [FromServices] Mapper mapper) =>
 {
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
+    if (await authorization.getLoggedUserAsync() is not User user) return Results.Problem();
     var post = mapper.Map(request);
     post.CreatedDate = DateTime.UtcNow;
     post.AuthorId = user.Id;
@@ -193,20 +206,20 @@ app.MapPost("/post", [Authorize] async ([FromBody] PostPostRequest request, [Fro
     await db.SaveChangesAsync();
     return Results.Created($"/post/{post.Id}", post.Id);
 });
-app.MapDelete("/post/{id}", [Authorize] async (int id, [FromServices] ShareItDBContext db, HttpContext context) =>
+app.MapDelete("/post/{id}", [Authorize] async (int id, 
+    [FromServices] ShareItDBContext db, [FromServices] AuthorizationService authorization) =>
 {
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
-    if (await db.Posts.ById(id).FirstOrDefaultAsync() is not Post post) return Results.BadRequest();
-    if (post.Id != id) return Results.Forbid();
+    if (await authorization.getLoggedUserAsync() is not User user) return Results.Problem();
+    if (await db.Posts.ById(id).FirstOrDefaultAsync() is not Post post) return Results.NotFound();
+    if (post.AuthorId != user.Id) return Results.Forbid();
     db.Posts.Remove(post);
     await db.SaveChangesAsync();
     return Results.Ok();
 });
-
 app.MapPost("/post/{postId}/comment", [Authorize] async (long postId, [FromBody] PostCommentRequest request,
-       [FromServices] ShareItDBContext db, [FromServices] Mapper mapper, HttpContext context) =>
+       [FromServices] ShareItDBContext db, [FromServices] Mapper mapper, [FromServices] AuthorizationService authorization) =>
 {
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
+    if (await authorization.getLoggedUserAsync() is not User user) return Results.Problem();
     if(await db.Posts.ById(postId).FirstOrDefaultAsync() is not Post post) return Results.NotFound();
 
     Comment comment = mapper.Map(request);
@@ -218,13 +231,12 @@ app.MapPost("/post/{postId}/comment", [Authorize] async (long postId, [FromBody]
 
     return Results.Created($"/post/{post.Id}/comment/{comment.Id}", comment.Id);
 });
-
 app.MapGet("/post/{postId}/comment", async (long postId, [FromQuery] int skip, [FromQuery] int take,
-       [FromServices] ShareItDBContext db, [FromServices] Mapper mapper, HttpContext context) =>
+       [FromServices] ShareItDBContext db, [FromServices] Mapper mapper, [FromServices] AuthorizationService authorization) =>
 {
     if (await db.Posts.ById(postId).FirstOrDefaultAsync() is not Post post) return Results.NotFound();
     var comments = mapper.Map(await db.Comments.ByPostId(post.Id).SkipTake(skip, take).WithAuthor().ToListAsync());
-    if (await getLoggedUserAsync(db, context) is User user)
+    if (await authorization.getLoggedUserAsync() is User user)
     {
         foreach(var comment in comments)
         {
@@ -233,11 +245,10 @@ app.MapGet("/post/{postId}/comment", async (long postId, [FromQuery] int skip, [
     }
     return Results.Ok(comments);
 });
-
 app.MapDelete("/post/comment/{commentId}", [Authorize]async (long commentId,
-       [FromServices] ShareItDBContext db, HttpContext context) =>
+       [FromServices] ShareItDBContext db, [FromServices] AuthorizationService authorization) =>
 {
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
+    if (await authorization.getLoggedUserAsync() is not User user) return Results.Problem();
     if (await db.Comments.ById(commentId).FirstOrDefaultAsync() is not Comment comment) return Results.NotFound();
     if (comment.AuthorId != user.Id) return Results.Forbid();
 
@@ -245,10 +256,10 @@ app.MapDelete("/post/comment/{commentId}", [Authorize]async (long commentId,
     await db.SaveChangesAsync();
     return Results.Ok();
 });
-
-app.MapPost("/post/{postId}/like", [Authorize] async (long postId, [FromServices] ShareItDBContext db, HttpContext context) =>
+app.MapPost("/post/{postId}/like", [Authorize] async (long postId, 
+    [FromServices] ShareItDBContext db, [FromServices] AuthorizationService authorization) =>
 {
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
+    if (await authorization.getLoggedUserAsync() is not User user) return Results.Problem();
     if (await db.Posts.ById(postId).FirstOrDefaultAsync() is not Post post) return Results.NotFound();
     if(await db.PostLikes.Where(pl => pl.PostId == postId && pl.UserId == user.Id).FirstOrDefaultAsync() is PostLike postLike)
     {
@@ -267,10 +278,10 @@ app.MapPost("/post/{postId}/like", [Authorize] async (long postId, [FromServices
     await db.SaveChangesAsync();
     return Results.Ok();
 });
-
-app.MapPost("/post/comment/{commentId}/like", [Authorize] async (long commentId, [FromServices] ShareItDBContext db, HttpContext context) =>
+app.MapPost("/post/comment/{commentId}/like", [Authorize] async (long commentId, 
+    [FromServices] ShareItDBContext db, [FromServices]AuthorizationService authorization) =>
 {
-    if (await getLoggedUserAsync(db, context) is not User user) return Results.Problem();
+    if (await authorization.getLoggedUserAsync() is not User user) return Results.Problem();
     if (await db.Comments.ById(commentId).FirstOrDefaultAsync() is not Comment comment) return Results.NotFound();
     if (await db.CommentLikes.Where(pl => pl.CommentId == commentId && pl.UserId == user.Id).FirstOrDefaultAsync() is CommentLike commentLike)
     {
@@ -289,13 +300,5 @@ app.MapPost("/post/comment/{commentId}/like", [Authorize] async (long commentId,
     await db.SaveChangesAsync();
     return Results.Ok();
 });
-
-
-async Task<User?> getLoggedUserAsync(ShareItDBContext db, HttpContext context)
-{
-    if (context.User.Identity is not ClaimsIdentity identity) return null;
-    if (identity.FindFirst(ClaimTypes.Name) is not Claim nameClaim) return null;
-    return await db.Users.ByUsername(nameClaim.Value).FirstOrDefaultAsync();
-}
 
 app.Run();
